@@ -1,50 +1,87 @@
-// Import Express.js
+// Import required modules
 const express = require('express');
+const crypto = require('crypto');
 
-// Create an Express app
 const app = express();
-
-// Middleware to parse JSON bodies
 app.use(express.json());
 
-// Set port and verify_token
-const port = process.env.PORT || 3000;
-const verifyToken = process.env.VERIFY_TOKEN;
+// Environment variables
+const PORT = process.env.PORT || 3000;
+const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
+const PRIVATE_KEY = Buffer.from(process.env.PRIVATE_KEY_BASE64, 'base64').toString('utf8');
 
-// Route for GET requests (Webhook Verification)
+// --- 1. VERIFY WEBHOOK (GET) ---
 app.get('/', (req, res) => {
-  const { 'hub.mode': mode, 'hub.challenge': challenge, 'hub.verify_token': token } = req.query;
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
 
-  if (mode === 'subscribe' && token === verifyToken) {
-    console.log('WEBHOOK VERIFIED');
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('✅ WEBHOOK VERIFIED');
     res.status(200).send(challenge);
   } else {
-    res.status(403).end();
+    res.status(403).send('Forbidden');
   }
 });
 
-// Route for POST requests (Webhook & Health Check)
-app.post('/', (req, res) => {
+// --- 2. HANDLE POST REQUESTS (Webhook + Health Check + Flow Encryption) ---
+app.post('/', async (req, res) => {
+  const body = req.body;
   const timestamp = new Date().toISOString().replace('T', ' ').slice(0, 19);
+  console.log(`\n📥 Webhook received at ${timestamp}\n`, JSON.stringify(body, null, 2));
 
-  // Check if this is a health check request from Meta
-  if (req.body && req.body.action === 'ping') {
-    console.log(`\nHealth check received ${timestamp}\n`);
-    return res.status(200).json({
-      data: {
-        status: 'active'
-      }
-    });
+  // --- Health Check ---
+  if (body.action === 'ping') {
+    console.log('✅ Health Check Received');
+    return res.json({ data: { status: 'active' } });
   }
 
-  // Otherwise, handle normal webhook payload
-  console.log(`\nWebhook received ${timestamp}\n`);
-  console.log(JSON.stringify(req.body, null, 2));
+  // --- WhatsApp Flow Payload ---
+  if (body.encrypted_flow_data && body.encrypted_aes_key && body.initial_vector) {
+    try {
+      // Step 1: Decrypt AES key using RSA Private Key
+      const decryptedAESKey = crypto.privateDecrypt(
+        {
+          key: PRIVATE_KEY,
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+        },
+        Buffer.from(body.encrypted_aes_key, 'base64')
+      );
 
-  res.status(200).end();
+      // Step 2: Decrypt Flow Data using AES key and IV
+      const iv = Buffer.from(body.initial_vector, 'base64');
+      const encryptedFlowData = Buffer.from(body.encrypted_flow_data, 'base64');
+
+      const decipher = crypto.createDecipheriv('aes-128-cbc', decryptedAESKey, iv);
+      let decryptedData = decipher.update(encryptedFlowData, null, 'utf8');
+      decryptedData += decipher.final('utf8');
+
+      console.log('✅ Decrypted Flow Data:', decryptedData);
+
+      // Here you can process `decryptedData` and create your response
+      const responseObject = {
+        message: 'Flow processed successfully',
+        received: JSON.parse(decryptedData),
+      };
+
+      // Step 3: Encrypt response using AES key
+      const responseString = JSON.stringify(responseObject);
+      const cipher = crypto.createCipheriv('aes-128-cbc', decryptedAESKey, iv);
+      let encryptedResponse = cipher.update(responseString, 'utf8', 'base64');
+      encryptedResponse += cipher.final('base64');
+
+      return res.status(200).send(encryptedResponse);
+    } catch (error) {
+      console.error('❌ Decryption Error:', error);
+      return res.status(421).send('Unable to decrypt request');
+    }
+  }
+
+  // If none of the above, acknowledge with 200 OK
+  res.sendStatus(200);
 });
 
 // Start the server
-app.listen(port, () => {
-  console.log(`\nListening on port ${port}\n`);
+app.listen(PORT, () => {
+  console.log(`✅ Server running on port ${PORT}`);
 });
