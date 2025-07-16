@@ -9,6 +9,7 @@ app.use(express.json());
 const PORT = process.env.PORT || 3000;
 const VERIFY_TOKEN = process.env.VERIFY_TOKEN;
 const PRIVATE_KEY = Buffer.from(process.env.PRIVATE_KEY_BASE64, 'base64').toString('utf8');
+const PRIVATE_KEY_PASSPHRASE = process.env.PRIVATE_KEY_PASSPHRASE; // Passphrase from .env
 
 // --- 1. VERIFY WEBHOOK (GET) ---
 app.get('/', (req, res) => {
@@ -39,11 +40,13 @@ app.post('/', async (req, res) => {
   // --- WhatsApp Flow Payload ---
   if (body.encrypted_flow_data && body.encrypted_aes_key && body.initial_vector) {
     try {
-      // Step 1: Decrypt AES key using RSA Private Key
+      // Step 1: Decrypt AES key using RSA Private Key (with passphrase)
       const decryptedAESKey = crypto.privateDecrypt(
         {
           key: PRIVATE_KEY,
+          passphrase: PRIVATE_KEY_PASSPHRASE, // Added passphrase
           padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: 'sha256' // Required for Meta
         },
         Buffer.from(body.encrypted_aes_key, 'base64')
       );
@@ -58,10 +61,10 @@ app.post('/', async (req, res) => {
 
       console.log('✅ Decrypted Flow Data:', decryptedData);
 
-      // Here you can process `decryptedData` and create your response
+      // Process decrypted data and build response
       const responseObject = {
         message: 'Flow processed successfully',
-        received: JSON.parse(decryptedData),
+        received: JSON.parse(decryptedData)
       };
 
       // Step 3: Encrypt response using AES key
