@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const app = express();
 app.use(express.json());
 
-// ⚠️ TEST CONFIGURATION (REMOVE IN PRODUCTION) ⚠️
+// ===== CONFIGURATION ===== //
 const PRIVATE_KEY = `-----BEGIN ENCRYPTED PRIVATE KEY-----
 MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQCqLDKCmUNUGSUANW
 QSQ0GQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQIpo0uv/kiA0UEggTI
@@ -34,30 +34,32 @@ nIxfU06tjgV0kYMhdvcbD5EFavWpvF5uN2Nd8RpGBZKQGM/DpnEfjbGmPAPb3ekw
 T00Rk+swdJK0046lzTJnbtnUlZ5JYsGIkjKFhYT+azNSykCPefQ1qiDxvqjrNpml
 nUEDs4/mXzWqQncLJqhgRWNMNS1ycemi
 -----END ENCRYPTED PRIVATE KEY-----`;
+const PRIVATE_KEY_PASSPHRASE = "1234";
 
-const PRIVATE_KEY_PASSPHRASE = "1234"; // Your passphrase
-
-// Verify endpoint
-app.get('/', (req, res) => {
-  const mode = req.query['hub.mode'];
-  const token = req.query['hub.verify_token'];
-  const challenge = req.query['hub.challenge'];
-
-  if (mode === 'subscribe' && token === process.env.VERIFY_TOKEN) {
-    console.log('✅ WEBHOOK VERIFIED');
-    res.status(200).send(challenge);
-  } else {
-    res.status(403).send('Forbidden');
+// ===== HEALTH CHECK ===== //
+app.post('/', (req, res) => {
+  // Handle health check
+  if (req.body.action === 'ping') {
+    console.log('🩺 Health check received');
+    return res.json({
+      data: {
+        status: "active",
+        timestamp: new Date().toISOString()
+      }
+    });
   }
+
+  // Handle flow data
+  if (req.body.encrypted_flow_data) {
+    return handleFlowRequest(req, res);
+  }
+
+  res.status(400).json({ error: "Unsupported request type" });
 });
 
-// Decryption endpoint
-app.post('/', async (req, res) => {
+// ===== FLOW HANDLER ===== //
+async function handleFlowRequest(req, res) {
   try {
-    if (!req.body.encrypted_flow_data || !req.body.encrypted_aes_key || !req.body.initial_vector) {
-      return res.status(400).json({ error: "Missing required fields" });
-    }
-
     // 1. Decrypt AES key
     const decryptedAESKey = crypto.privateDecrypt(
       {
@@ -69,7 +71,7 @@ app.post('/', async (req, res) => {
       Buffer.from(req.body.encrypted_aes_key, 'base64')
     );
 
-    // 2. Prepare AES key (first 32 bytes) and IV
+    // 2. Prepare crypto parameters
     const aesKey = decryptedAESKey.subarray(0, 32);
     const iv = Buffer.from(req.body.initial_vector, 'base64');
 
@@ -78,15 +80,15 @@ app.post('/', async (req, res) => {
     let decrypted = decipher.update(req.body.encrypted_flow_data, 'base64', 'utf8');
     decrypted += decipher.final('utf8');
 
-    console.log('✅ Decrypted Data:', decrypted);
+    console.log('🔓 Decrypted Flow Data:', decrypted);
 
-    // 4. Prepare response (Meta expects this format)
+    // 4. Prepare Meta-compliant response
     const response = {
       version: "3.0",
       data: {
         fulfillment_response: {
           messages: [{
-            text: { body: "Successfully processed your flow!" }
+            text: { body: "Success! We processed your flow." }
           }]
         }
       }
@@ -100,17 +102,17 @@ app.post('/', async (req, res) => {
     return res.send(encryptedResponse);
 
   } catch (error) {
-    console.error('❌ Decryption Error:', {
-      message: error.message,
-      stack: error.stack
-    });
+    console.error('❌ Flow Processing Error:', error);
     return res.status(421).json({
-      error: "Decryption failed",
-      details: error.message,
-      solution: "Verify your private key and passphrase are correct"
+      error: "flow_processing_failed",
+      details: error.message
     });
   }
+}
+
+// ===== SERVER ===== //
+app.listen(3000, () => {
+  console.log('🚀 Server running on port 3000');
+  console.log('Endpoints:');
+  console.log('POST / - Health checks and flow processing');
 });
-
-app.listen(3000, () => console.log('Server running on port 3000'));
-
