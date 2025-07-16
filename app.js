@@ -1,10 +1,14 @@
 const express = require('express');
 const crypto = require('crypto');
+
 const app = express();
 app.use(express.json());
 
-// ===== CONFIGURATION ===== //
-const PRIVATE_KEY = `-----BEGIN ENCRYPTED PRIVATE KEY-----
+// ✅ Hardcoded values
+const PORT = 3000;
+const VERIFY_TOKEN = 'token';
+const PRIVATE_KEY = `
+-----BEGIN ENCRYPTED PRIVATE KEY-----
 MIIFJDBWBgkqhkiG9w0BBQ0wSTAxBgkqhkiG9w0BBQwwJAQQCqLDKCmUNUGSUANW
 QSQ0GQICCAAwDAYIKoZIhvcNAgkFADAUBggqhkiG9w0DBwQIpo0uv/kiA0UEggTI
 toUuSqaewXgO6aQCc4rRi65VohF2f84W560VXCklUFqQltghlOEMXmHRPLDvyLha
@@ -33,130 +37,75 @@ kSedb8kS60iW9h51g77s7R12JJDbkj0sVJAOMg6ZNslk3fygkuLOdjDoG5FGg7sT
 nIxfU06tjgV0kYMhdvcbD5EFavWpvF5uN2Nd8RpGBZKQGM/DpnEfjbGmPAPb3ekw
 T00Rk+swdJK0046lzTJnbtnUlZ5JYsGIkjKFhYT+azNSykCPefQ1qiDxvqjrNpml
 nUEDs4/mXzWqQncLJqhgRWNMNS1ycemi
------END ENCRYPTED PRIVATE KEY-----`;
-const PRIVATE_KEY_PASSPHRASE = "1234";
+-----END ENCRYPTED PRIVATE KEY-----
+`;
+const PRIVATE_KEY_PASSPHRASE = '1234';
 
-// ===== CRYPTO COMPATIBILITY ===== //
-const RSA_OAEP_SUPPORTED = crypto.getCiphers().includes('rsa-oaep');
-console.log(`🔐 Crypto Support - RSA-OAEP: ${RSA_OAEP_SUPPORTED}`);
+// ✅ Webhook verification
+app.get('/', (req, res) => {
+  const mode = req.query['hub.mode'];
+  const token = req.query['hub.verify_token'];
+  const challenge = req.query['hub.challenge'];
 
-// ===== MIDDLEWARE ===== //
-app.use((req, res, next) => {
-  console.log(`📥 ${req.method} ${req.path}`);
-  next();
-});
-
-// ===== HEALTH CHECK ===== //
-app.post('/', (req, res) => {
-  if (req.body?.action === 'ping') {
-    console.log('🩺 Health check received');
-    return res.json({
-      data: {
-        status: "active",
-        timestamp: new Date().toISOString(),
-        crypto: {
-          aes256: true,
-          rsaOaep: RSA_OAEP_SUPPORTED,
-          nodeVersion: process.version,
-          usingFallback: !RSA_OAEP_SUPPORTED
-        }
-      }
-    });
+  if (mode === 'subscribe' && token === VERIFY_TOKEN) {
+    console.log('✅ WEBHOOK VERIFIED');
+    return res.status(200).send(challenge);
+  } else {
+    return res.sendStatus(403);
   }
-  next(); // Forward to flow handler
 });
 
-// ===== FLOW HANDLER ===== //
+// ✅ Handle POST requests (Health check + Flow data)
 app.post('/', async (req, res) => {
-  if (!req.body.encrypted_flow_data || !req.body.encrypted_aes_key || !req.body.initial_vector) {
-    return res.status(400).json({ 
-      error: "missing_required_fields",
-      details: "Request must contain encrypted_flow_data, encrypted_aes_key, and initial_vector"
-    });
+  const body = req.body;
+  console.log('📥 Incoming Webhook:', JSON.stringify(body, null, 2));
+
+  // Health check
+  if (body.action === 'ping') {
+    console.log('✅ Health check received');
+    return res.json({ data: { status: 'active' } });
   }
 
-  try {
-    // 1. Decrypt AES Key
-    const decryptedAESKey = crypto.privateDecrypt(
-      {
-        key: PRIVATE_KEY,
-        passphrase: PRIVATE_KEY_PASSPHRASE,
-        padding: RSA_OAEP_SUPPORTED 
-          ? crypto.constants.RSA_PKCS1_OAEP_PADDING
-          : crypto.constants.RSA_PKCS1_PADDING
-      },
-      Buffer.from(req.body.encrypted_aes_key, 'base64')
-    );
+  // Handle flow encryption
+  if (body.encrypted_flow_data && body.encrypted_aes_key && body.initial_vector) {
+    try {
+      const decryptedAESKey = crypto.privateDecrypt(
+        {
+          key: PRIVATE_KEY,
+          passphrase: PRIVATE_KEY_PASSPHRASE,
+          padding: crypto.constants.RSA_PKCS1_OAEP_PADDING,
+          oaepHash: 'sha256',
+        },
+        Buffer.from(body.encrypted_aes_key, 'base64')
+      );
 
-    // 2. Prepare AES-256 Key (exactly 32 bytes)
-    const aesKey = Buffer.alloc(32);
-    decryptedAESKey.copy(aesKey, 0, 0, 32);
-    
-    // 3. Prepare IV (exactly 16 bytes)
-    const iv = Buffer.from(req.body.initial_vector, 'base64');
-    if (iv.length !== 16) {
-      throw new Error(`Invalid IV length: ${iv.length} bytes (needs 16)`);
+      const iv = Buffer.from(body.initial_vector, 'base64');
+      const encryptedFlowData = Buffer.from(body.encrypted_flow_data, 'base64');
+
+      const decipher = crypto.createDecipheriv('aes-128-cbc', decryptedAESKey, iv);
+      let decryptedData = decipher.update(encryptedFlowData, null, 'utf8');
+      decryptedData += decipher.final('utf8');
+
+      console.log('✅ Decrypted Flow Data:', decryptedData);
+
+      const responseObject = {
+        message: 'Flow processed successfully',
+        received: JSON.parse(decryptedData),
+      };
+
+      const responseString = JSON.stringify(responseObject);
+      const cipher = crypto.createCipheriv('aes-128-cbc', decryptedAESKey, iv);
+      let encryptedResponse = cipher.update(responseString, 'utf8', 'base64');
+      encryptedResponse += cipher.final('base64');
+
+      return res.status(200).send(encryptedResponse);
+    } catch (error) {
+      console.error('❌ Decryption Error:', error.message);
+      return res.status(421).send('Unable to decrypt request');
     }
-
-    // 4. Decrypt Flow Data
-    const decipher = crypto.createDecipheriv('aes-256-cbc', aesKey, iv);
-    let decrypted = decipher.update(req.body.encrypted_flow_data, 'base64', 'utf8');
-    decrypted += decipher.final('utf8');
-
-    console.log('🔓 Decrypted Flow Data:', decrypted);
-
-    // 5. Prepare Meta-compliant Response
-    const response = {
-      version: "3.0",
-      data: {
-        fulfillment_response: {
-          messages: [{
-            text: { body: "Flow processed successfully!" }
-          }]
-        }
-      }
-    };
-
-    // 6. Encrypt Response
-    const cipher = crypto.createCipheriv('aes-256-cbc', aesKey, iv);
-    let encryptedResponse = cipher.update(JSON.stringify(response), 'utf8', 'base64');
-    encryptedResponse += cipher.final('base64');
-
-    return res.send(encryptedResponse);
-
-  } catch (error) {
-    console.error('❌ Decryption Error:', {
-      error: error.message,
-      stack: error.stack,
-      cryptoSupport: {
-        rsaOaep: RSA_OAEP_SUPPORTED,
-        nodeVersion: process.version
-      }
-    });
-
-    return res.status(421).json({
-      error: "decryption_failed",
-      details: error.message,
-      cryptoInfo: {
-        paddingUsed: RSA_OAEP_SUPPORTED ? "OAEP" : "PKCS1",
-        nodeVersion: process.version,
-        requiredKeyLengths: {
-          aesKey: "32 bytes",
-          iv: "16 bytes"
-        }
-      }
-    });
   }
+
+  res.sendStatus(200);
 });
 
-// ===== SERVER ===== //
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`🚀 Server running on port ${PORT}`);
-  console.log('Endpoints:');
-  console.log(`POST / - Health checks and flow processing`);
-  console.log('\n🔐 Crypto Support:');
-  console.log('- Node Version:', process.version);
-  console.log('- RSA-OAEP:', RSA_OAEP_SUPPORTED);
-  console.log('- AES-256-CBC:', crypto.getCiphers().includes('aes-256-cbc'));
-});
+app.listen(PORT, () => console.log(`✅ Server running on port ${PORT}`));
